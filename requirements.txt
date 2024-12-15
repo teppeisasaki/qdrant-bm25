@@ -1,0 +1,7 @@
+mecab-python3==1.0.10
+unidic-lite==1.0.8
+neologdn==0.5.3
+stopwordsiso==0.6.1
+datasets==3.2.0
+langchain_text_splitters==0.3.3
+qdrant_client==1.12.1
