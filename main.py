@@ -4,6 +4,7 @@ import stopwordsiso
 from datasets import load_dataset
 from fastembed import SparseEmbedding, SparseTextEmbedding
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     PointStruct,
@@ -295,7 +296,7 @@ def main():
     )
 
     # Step 5: クエリの埋め込み
-    query_text = "鼠をとる猫"
+    query_text = "吾輩は猫である"
     query_embedding = embedder.embed_query(query_text=query_text)
 
     # Step 6: クエリで検索
