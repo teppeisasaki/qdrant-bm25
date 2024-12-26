@@ -10,3 +10,4 @@ torch
 fugashi
 yasem
 pygame
+langchain_huggingface

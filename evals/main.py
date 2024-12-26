@@ -1,11 +1,8 @@
-import MeCab
-import numpy
-import stopwordsiso
+from typing import Mapping
+import uuid
 from datasets import load_dataset
-from fastembed import SparseEmbedding, SparseTextEmbedding
+from fastembed import SparseEmbedding
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-
-from yasem import SpladeEmbedder
 
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
@@ -15,6 +12,7 @@ from qdrant_client.models import (
     SparseIndexParams,
     Modifier,
     NamedSparseVector,
+    VectorParams,
 )
 
 
@@ -101,95 +99,6 @@ class TextChunker:
         return chunk_texts
 
 
-class TextEmbedder:
-    """テキストチャンクのスパース埋め込みを生成するクラス。
-
-    Attributes:
-        None
-    """
-
-    def __init__(self):
-        """TextEmbedderを初期化します。"""
-        self._bm25_model = SparseTextEmbedding(
-            model_name="Qdrant/bm25", disable_stemmer=True
-        )
-        self._mecab_tagger = MeCab.Tagger()
-        self._stopwords = stopwordsiso.stopwords("ja")
-
-    def _remove_symbols(self, nodes: list) -> list:
-        """補助記号を削除します。
-
-        Args:
-            nodes (list): トークン化されたノードのリスト
-
-        Returns:
-            list: 記号を含まないノードのリスト
-        """
-        # ref. https://hayashibe.jp/tr/mecab/dictionary/unidic/pos
-        return [node for node in nodes if node[1] != "補助記号"]
-
-    def _remove_stopwords(self, nodes: list) -> list:
-        """ストップワードを削除します。
-
-        Args:
-            nodes (list): トークン化されたノードのリスト
-
-        Returns:
-            list: ストップワードを含まないノードのリスト
-        """
-        return [node for node in nodes if node[0] not in self._stopwords]
-
-    def _tokenize(self, text: str) -> list[str]:
-        """MeCabを使用してテキストをトークン化します。
-
-        Args:
-            text (str): トークン化する入力テキスト
-
-        Returns:
-            list[str]: トークンのリスト
-        """
-        # 形態素解析
-        lines = self._mecab_tagger.parse(text).splitlines()[:-1]
-        nodes = [
-            [line.split("\t")[0], line.split("\t")[4].split("-")[0]] for line in lines
-        ]
-        # 補助記号を削除
-        nodes = self._remove_symbols(nodes)
-        # ストップワードを削除
-        nodes = self._remove_stopwords(nodes)
-        return [node[0] for node in nodes]
-
-    def embed_documents(self, chunk_texts: list[str]) -> list[SparseEmbedding]:
-        """ドキュメントに対するチャンクの埋め込みを生成します。
-
-        Args:
-            chunk_texts (list[str]): 埋め込みを生成するテキストチャンクのリスト
-
-        Returns:
-            list[SparseEmbedding]: 埋め込みのリスト
-        """
-        embedder = SpladeEmbedder("hotchpotch/japanese-splade-base-v1")
-        embeddings = embedder.encode(chunk_texts)
-
-        results = []
-        for embedding in embeddings:
-            token_values = embedder.get_token_values(embedding=embedding)
-            values = token_values.values()
-            indices = token_values.keys()
-            indices = embedder.tokenizer.convert_tokens_to_ids(indices)
-            results.append(
-                SparseEmbedding(
-                    values=numpy.array(values), indices=numpy.array(indices)
-                )
-            )
-
-        return results
-
-    def embed_query(self, query_text: str) -> list[SparseEmbedding]:
-        result = self.embed_documents(chunk_texts=[query_text])[0]
-        return result
-
-
 class QdrantManager:
     """Qdrantコレクションと操作を管理するクラス。
 
@@ -206,7 +115,11 @@ class QdrantManager:
         self.client = QdrantClient(url=url)
         self.collection_name = collection_name
 
-    def init_collection(self) -> None:
+    def init_collection(
+        self,
+        sparse_vectors_config: Mapping[str, SparseVectorParams] = {},
+        vectors_config: VectorParams | Mapping[str, VectorParams] = {},
+    ) -> None:
         """Qdrantコレクションを初期化します。
 
         Returns:
@@ -215,19 +128,16 @@ class QdrantManager:
         if self.client.collection_exists(collection_name=self.collection_name):
             self.client.delete_collection(collection_name=self.collection_name)
 
-        sparse_config = {
-            "sparse": SparseVectorParams(
-                index=SparseIndexParams(on_disk=False), modifier=Modifier.IDF
-            )
-        }
         self.client.create_collection(
             collection_name=self.collection_name,
-            vectors_config={},
-            sparse_vectors_config=sparse_config,
+            vectors_config=vectors_config,
+            sparse_vectors_config=sparse_vectors_config,
         )
 
-    def insert_chunks(
-        self, chunk_texts: list[str], chunk_embeddings: list[SparseEmbedding]
+    def insert_embeddings(
+        self,
+        texts: list[str],
+        dense_embeddings: list[float] = [],
     ) -> None:
         """テキストチャンクと埋め込みをQdrantにインサートします。
 
@@ -239,20 +149,52 @@ class QdrantManager:
         Returns:
             None
         """
+
         points = []
-        for idx, embedding in enumerate(chunk_embeddings):
+        for idx, embedding in enumerate(dense_embeddings):
+            id = uuid.uuid4()
+            vector = embedding
             point = PointStruct(
-                id=idx + 1,
-                payload={"text": chunk_texts[idx]},
-                vector={
-                    "sparse": SparseVector(
-                        indices=embedding.indices.tolist(),
-                        values=embedding.values.tolist(),
-                    )
-                },
+                id=id,
+                payload={"text": texts[idx]},
+                vector=vector,
             )
             points.append(point)
-        self.client.upsert(collection_name=self.collection_name, points=points)
+
+        self.client.upsert(
+            collection_name=self.collection_name, points=points, batch_size=100
+        )
+
+    def insert_sparse_embeddings(
+        self,
+        texts: list[str],
+        sparse_embeddings: list[SparseEmbedding] = [],
+    ) -> None:
+        """テキストチャンクと埋め込みをQdrantにインサートします。
+
+        Args:
+            collection_name (str): コレクションの名前
+            chunk_texts (list[str]): テキストチャンクのリスト
+            chunk_embeddings (list[SparseEmbedding]): 埋め込みのリスト
+
+        Returns:
+            None
+        """
+        for idx, embedding in enumerate(sparse_embeddings):
+            id = uuid.uuid4()
+            vector = NamedSparseVector(
+                name="sparse",
+                vector=SparseVector(
+                    indices=embedding.indices.tolist(),
+                    values=embedding.values.tolist(),
+                ),
+            )
+            point = PointStruct(
+                id=id,
+                payload={"text": texts[idx]},
+                vector=vector,
+            )
+            self.client.upsert(collection_name=self.collection_name, points=[point])
 
     def search(self, query_embedding: SparseEmbedding, limit: int = 5):
         """スパースベクトルを使って、キーワード検索を行います。
@@ -287,13 +229,17 @@ def main():
 
     # Step 3: Qdrant データベースの準備
     qdrant_manager = QdrantManager(collection_name="eval_collection")
-    qdrant_manager.init_collection()
+    qdrant_manager.init_collection(
+        sparse_vectors_config={
+            "sparse": SparseVectorParams(
+                index=SparseIndexParams(on_disk=False), modifier=Modifier.IDF
+            )
+        }
+    )
 
-    # Step 4: チャンクをデータベースに登録
-    embedder = TextEmbedder()
     chunk_embeddings = embedder.embed_documents(chunk_texts=chunk_texts)
-    qdrant_manager.insert_chunks(
-        chunk_texts=chunk_texts, chunk_embeddings=chunk_embeddings
+    qdrant_manager.insert_embeddings(
+        texts=chunk_texts, dense_embeddings=chunk_embeddings
     )
 
     # Step 5: クエリの埋め込み
