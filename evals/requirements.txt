@@ -11,3 +11,6 @@ fugashi
 yasem
 pygame
 langchain_huggingface
+llama-index
+llama-index-retrievers-bm25
+pytest

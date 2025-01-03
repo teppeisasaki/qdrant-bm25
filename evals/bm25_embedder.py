@@ -2,10 +2,11 @@ import MeCab
 import neologdn
 import stopwordsiso
 
+from llama_index.core.schema import BaseNode
+
 from fastembed import SparseEmbedding, SparseTextEmbedding
 
-
-class TextEmbedder:
+class BM25Embedder:
     """テキストチャンクのスパース埋め込みを生成するクラス。
 
     Attributes:
@@ -63,7 +64,20 @@ class TextEmbedder:
         nodes = self._remove_stopwords(nodes)
         return [node[0] for node in nodes]
 
-    def embed_documents(self, chunk_texts: list[str]) -> list[SparseEmbedding]:
+    def count_tokens(self, text: str) -> int:
+        """テキストのトークン数を取得します。
+
+        Args:
+            text (str): トークン数を取得するテキスト
+
+        Returns:
+            int: トークン数
+        """
+        normalized_text = neologdn.normalize(text=text)
+        tokens = self._tokenize(text=normalized_text)
+        return len(tokens)
+
+    def embed_texts(self, texts: list[str]) -> list[SparseEmbedding]:
         """ドキュメントに対するチャンクの埋め込みを生成します。
 
         Args:
@@ -73,14 +87,27 @@ class TextEmbedder:
             list[SparseEmbedding]: 埋め込みのリスト
         """
         filtered_chunks = []
-        for chunk_text in chunk_texts:
+        for chunk_text in texts:
             normalized_text = neologdn.normalize(text=chunk_text)
             tokens = self._tokenize(text=normalized_text)
             concat_tokens = " ".join(tokens)
             filtered_chunks.append(concat_tokens)
         return list(self._bm25_model.embed(documents=filtered_chunks, parallel=0))
+    
+    
+    def embed_nodes(self, nodes: list[BaseNode]) -> list[SparseEmbedding]:
+        """ドキュメントを多言語トランスフォーマーモデルを使用して埋め込み、正規化された埋め込みを返します。
 
-    def embed_query(self, query_text: str) -> SparseEmbedding:
+        Args:
+            documents (list[Document]): 埋め込む入力ドキュメント。
+
+        Returns:
+            list[float]: 入力ドキュメントの正規化された埋め込みのリスト。
+        """
+        texts = [node.get_content() for node in nodes]
+        return self.embed_texts(texts=texts)
+
+    def embed_query(self, query: str) -> SparseEmbedding:
         """クエリに対するチャンクの埋め込みを生成します。
 
         Args:
@@ -89,7 +116,7 @@ class TextEmbedder:
         Returns:
             SparseEmbedding: 埋め込み
         """
-        normalized_text = neologdn.normalize(text=query_text)
+        normalized_text = neologdn.normalize(text=query)
         tokens = self._tokenize(text=normalized_text)
         tokenized_query = " ".join(tokens)
         return list(self._bm25_model.query_embed(query=tokenized_query))[0]
